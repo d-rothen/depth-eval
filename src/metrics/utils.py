@@ -1,4 +1,4 @@
-"""Utility functions for depth processing and loading."""
+"""Utility functions for depth and RGB processing and loading."""
 
 import numpy as np
 from pathlib import Path
@@ -46,6 +46,34 @@ def load_depth_file(
         depth = convert_planar_to_radial(depth, intrinsics)
 
     return depth.astype(np.float32)
+
+
+def load_rgb_file(
+    file_path: Union[str, Path],
+) -> np.ndarray:
+    """Load an RGB image file.
+
+    Supports .jpg, .jpeg, and .png files.
+
+    Args:
+        file_path: Path to the RGB file.
+
+    Returns:
+        RGB image as a float32 array in [0, 1] range with shape (H, W, 3).
+
+    Raises:
+        ValueError: If file format is not supported.
+    """
+    file_path = Path(file_path)
+    suffix = file_path.suffix.lower()
+
+    if suffix not in [".jpg", ".jpeg", ".png"]:
+        raise ValueError(f"Unsupported RGB file format: {suffix}")
+
+    img = Image.open(file_path).convert("RGB")
+    rgb = np.array(img).astype(np.float32) / 255.0
+
+    return rgb
 
 
 def convert_planar_to_radial(depth_planar: np.ndarray, intrinsics: dict) -> np.ndarray:
@@ -142,3 +170,31 @@ def depth_to_3channel(depth: np.ndarray) -> np.ndarray:
     """
     normalized = normalize_depth_for_visualization(depth)
     return np.stack([normalized, normalized, normalized], axis=-1)
+
+
+def get_depth_bins(
+    depth: np.ndarray,
+    near_threshold: float = 1.0,
+    far_threshold: float = 5.0,
+) -> dict:
+    """Get masks for near/mid/far depth bins.
+
+    Args:
+        depth: Depth map in meters.
+        near_threshold: Depth threshold for near bin (0, near_threshold].
+        far_threshold: Depth threshold for far bin (far_threshold, inf).
+
+    Returns:
+        Dictionary with 'near', 'mid', 'far' boolean masks.
+    """
+    valid_mask = (depth > 0) & np.isfinite(depth)
+
+    near_mask = valid_mask & (depth <= near_threshold)
+    mid_mask = valid_mask & (depth > near_threshold) & (depth <= far_threshold)
+    far_mask = valid_mask & (depth > far_threshold)
+
+    return {
+        "near": near_mask,
+        "mid": mid_mask,
+        "far": far_mask,
+    }

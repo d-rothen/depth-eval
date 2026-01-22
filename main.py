@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Main entry point for depth evaluation.
+"""Main entry point for depth and RGB evaluation.
 
-Parses config.json and runs evaluation between two datasets.
+Parses config.json and runs evaluation between datasets.
 """
 
 import argparse
@@ -9,7 +9,38 @@ import json
 import sys
 from pathlib import Path
 
-from src.evaluate import evaluate_datasets
+from src.evaluate import evaluate_depth_datasets, evaluate_rgb_datasets
+
+
+def validate_dataset_config(dataset: dict, name: str, allow_output: bool = True) -> None:
+    """Validate a single dataset configuration.
+
+    Args:
+        dataset: Dataset configuration dictionary.
+        name: Name for error messages.
+        allow_output: Whether output_file is allowed.
+
+    Raises:
+        ValueError: If configuration is invalid.
+    """
+    if "name" not in dataset:
+        raise ValueError(f"{name} must have a 'name' field")
+    if "path" not in dataset:
+        raise ValueError(f"{name} must have a 'path' field")
+
+    path = Path(dataset["path"])
+    if not path.exists():
+        raise ValueError(f"Dataset path does not exist: {path}")
+
+    if not allow_output and "output_file" in dataset:
+        raise ValueError(f"{name}: output_file is only allowed on non-GT datasets")
+
+    if "intrinsics" in dataset:
+        intrinsics = dataset["intrinsics"]
+        required_keys = ["fx", "fy", "cx", "cy"]
+        for key in required_keys:
+            if key not in intrinsics:
+                raise ValueError(f"{name} intrinsics missing '{key}'")
 
 
 def load_config(config_path: str) -> dict:
@@ -27,41 +58,88 @@ def load_config(config_path: str) -> dict:
     with open(config_path, "r") as f:
         config = json.load(f)
 
-    if "datasets" not in config:
-        raise ValueError("Config must contain 'datasets' key")
+    # Validate depth section if present
+    if "depth" in config:
+        depth_config = config["depth"]
+        if "gt_dataset" not in depth_config:
+            raise ValueError("depth section must have 'gt_dataset'")
+        if "datasets" not in depth_config:
+            raise ValueError("depth section must have 'datasets' array")
 
-    datasets = config["datasets"]
-    if len(datasets) != 2:
-        raise ValueError("Config must contain exactly 2 datasets for comparison")
+        validate_dataset_config(
+            depth_config["gt_dataset"], "depth.gt_dataset", allow_output=False
+        )
+        for i, dataset in enumerate(depth_config["datasets"]):
+            validate_dataset_config(dataset, f"depth.datasets[{i}]", allow_output=True)
 
-    # Validate each dataset config
-    for i, dataset in enumerate(datasets):
-        if "name" not in dataset:
-            raise ValueError(f"Dataset {i} must have a 'name' field")
-        if "path" not in dataset:
-            raise ValueError(f"Dataset {i} must have a 'path' field")
+    # Validate RGB section if present
+    if "rgb" in config:
+        rgb_config = config["rgb"]
+        if "gt_dataset" not in rgb_config:
+            raise ValueError("rgb section must have 'gt_dataset'")
+        if "datasets" not in rgb_config:
+            raise ValueError("rgb section must have 'datasets' array")
 
-        # Validate path exists
-        path = Path(dataset["path"])
-        if not path.exists():
-            raise ValueError(f"Dataset path does not exist: {path}")
+        validate_dataset_config(
+            rgb_config["gt_dataset"], "rgb.gt_dataset", allow_output=False
+        )
+        for i, dataset in enumerate(rgb_config["datasets"]):
+            validate_dataset_config(dataset, f"rgb.datasets[{i}]", allow_output=True)
 
-        # Validate intrinsics if provided
-        if "intrinsics" in dataset:
-            intrinsics = dataset["intrinsics"]
-            required_keys = ["fx", "fy", "cx", "cy"]
-            for key in required_keys:
-                if key not in intrinsics:
-                    raise ValueError(
-                        f"Dataset '{dataset['name']}' intrinsics missing '{key}'"
-                    )
+    if "depth" not in config and "rgb" not in config:
+        raise ValueError("Config must contain at least 'depth' or 'rgb' section")
 
     return config
 
 
+def save_results(results: dict, dataset_config: dict, default_path: Path) -> Path:
+    """Save results to output file.
+
+    Args:
+        results: Results dictionary.
+        dataset_config: Dataset configuration.
+        default_path: Default path if output_file not specified.
+
+    Returns:
+        Path where results were saved.
+    """
+    output_file = dataset_config.get("output_file")
+    if output_file is None:
+        output_file = default_path / "metrics.json"
+    else:
+        output_file = Path(output_file)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+    return output_file
+
+
+def print_results(results: dict, title: str) -> None:
+    """Print results summary."""
+    print(f"\n{'=' * 60}")
+    print(title)
+    print("=" * 60)
+
+    def print_dict(d: dict, indent: int = 0) -> None:
+        prefix = "  " * indent
+        for key, value in d.items():
+            if isinstance(value, dict):
+                print(f"{prefix}{key}:")
+                print_dict(value, indent + 1)
+            elif isinstance(value, float):
+                print(f"{prefix}{key}: {value:.6f}")
+            else:
+                print(f"{prefix}{key}: {value}")
+
+    print_dict(results)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate depth estimation between two datasets"
+        description="Evaluate depth and RGB datasets"
     )
     parser.add_argument(
         "config",
@@ -93,6 +171,16 @@ def main():
         action="store_true",
         help="Enable verbose output",
     )
+    parser.add_argument(
+        "--skip-depth",
+        action="store_true",
+        help="Skip depth evaluation",
+    )
+    parser.add_argument(
+        "--skip-rgb",
+        action="store_true",
+        help="Skip RGB evaluation",
+    )
 
     args = parser.parse_args()
 
@@ -103,55 +191,66 @@ def main():
         print(f"Error loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Extract dataset configurations
-    dataset1_config = config["datasets"][0]
-    dataset2_config = config["datasets"][1]
-
-    print(f"Evaluating: '{dataset1_config['name']}' vs '{dataset2_config['name']}'")
-    print(f"Dataset 1 path: {dataset1_config['path']}")
-    print(f"Dataset 2 path: {dataset2_config['path']}")
     print(f"Device: {args.device}")
     print("-" * 60)
 
-    # Run evaluation
-    results = evaluate_datasets(
-        dataset1_config=dataset1_config,
-        dataset2_config=dataset2_config,
-        device=args.device,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        verbose=args.verbose,
-    )
+    # Get depth GT config for RGB depth-binned metrics
+    depth_gt_config = None
+    if "depth" in config:
+        depth_gt_config = config["depth"]["gt_dataset"]
 
-    # Save results
-    for dataset_config, result in zip(config["datasets"], [results, results]):
-        output_file = dataset_config.get("output_file")
-        if output_file is None:
-            output_file = Path(dataset_config["path"]) / "metrics.json"
-        else:
-            output_file = Path(output_file)
+    # Evaluate depth datasets
+    if "depth" in config and not args.skip_depth:
+        depth_config = config["depth"]
+        gt_config = depth_config["gt_dataset"]
 
-        output_file.parent.mkdir(parents=True, exist_ok=True)
+        print(f"\n[DEPTH] Ground Truth: '{gt_config['name']}' ({gt_config['path']})")
 
-        with open(output_file, "w") as f:
-            json.dump(results, f, indent=2)
+        for dataset_config in depth_config["datasets"]:
+            print(f"\n[DEPTH] Evaluating: '{dataset_config['name']}'")
+            print(f"  Path: {dataset_config['path']}")
 
-        print(f"Results saved to: {output_file}")
+            results = evaluate_depth_datasets(
+                gt_config=gt_config,
+                pred_config=dataset_config,
+                device=args.device,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                verbose=args.verbose,
+            )
 
-    # Print summary
-    print("\n" + "=" * 60)
-    print("EVALUATION RESULTS")
-    print("=" * 60)
-    for category, metrics in results.items():
-        print(f"\n{category}:")
-        if isinstance(metrics, dict):
-            for name, value in metrics.items():
-                if isinstance(value, float):
-                    print(f"  {name}: {value:.6f}")
-                else:
-                    print(f"  {name}: {value}")
-        else:
-            print(f"  {metrics}")
+            output_path = save_results(
+                results, dataset_config, Path(dataset_config["path"])
+            )
+            print(f"  Results saved to: {output_path}")
+            print_results(results, f"DEPTH: {dataset_config['name']}")
+
+    # Evaluate RGB datasets
+    if "rgb" in config and not args.skip_rgb:
+        rgb_config = config["rgb"]
+        gt_config = rgb_config["gt_dataset"]
+
+        print(f"\n[RGB] Ground Truth: '{gt_config['name']}' ({gt_config['path']})")
+
+        for dataset_config in rgb_config["datasets"]:
+            print(f"\n[RGB] Evaluating: '{dataset_config['name']}'")
+            print(f"  Path: {dataset_config['path']}")
+
+            results = evaluate_rgb_datasets(
+                gt_config=gt_config,
+                pred_config=dataset_config,
+                depth_gt_config=depth_gt_config,
+                device=args.device,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                verbose=args.verbose,
+            )
+
+            output_path = save_results(
+                results, dataset_config, Path(dataset_config["path"])
+            )
+            print(f"  Results saved to: {output_path}")
+            print_results(results, f"RGB: {dataset_config['name']}")
 
 
 if __name__ == "__main__":
