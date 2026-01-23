@@ -12,7 +12,12 @@ from pathlib import Path
 from src.evaluate import evaluate_depth_datasets, evaluate_rgb_datasets
 
 
-def validate_dataset_config(dataset: dict, name: str, allow_output: bool = True) -> None:
+def validate_dataset_config(
+    dataset: dict,
+    name: str,
+    allow_output: bool = True,
+    allow_dim: bool = False,
+) -> None:
     """Validate a single dataset configuration.
 
     Args:
@@ -34,6 +39,16 @@ def validate_dataset_config(dataset: dict, name: str, allow_output: bool = True)
 
     if not allow_output and "output_file" in dataset:
         raise ValueError(f"{name}: output_file is only allowed on non-GT datasets")
+
+    if "dim" in dataset:
+        if not allow_dim:
+            raise ValueError(f"{name}: dim is only allowed on rgb.datasets entries")
+        dim = dataset["dim"]
+        if not isinstance(dim, list) or len(dim) != 2:
+            raise ValueError(f"{name}: dim must be a list like [height, width]")
+        for value in dim:
+            if not isinstance(value, (int, float)) or value <= 0 or int(value) != value:
+                raise ValueError(f"{name}: dim values must be positive integers")
 
     if "intrinsics" in dataset:
         intrinsics = dataset["intrinsics"]
@@ -84,7 +99,9 @@ def load_config(config_path: str) -> dict:
             rgb_config["gt_dataset"], "rgb.gt_dataset", allow_output=False
         )
         for i, dataset in enumerate(rgb_config["datasets"]):
-            validate_dataset_config(dataset, f"rgb.datasets[{i}]", allow_output=True)
+            validate_dataset_config(
+                dataset, f"rgb.datasets[{i}]", allow_output=True, allow_dim=True
+            )
 
     if "depth" not in config and "rgb" not in config:
         raise ValueError("Config must contain at least 'depth' or 'rgb' section")

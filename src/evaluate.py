@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 from tqdm import tqdm
+from PIL import Image
 
 from .metrics import (
     # Depth utilities and metrics
@@ -146,6 +147,98 @@ def find_matching_depth_for_rgb_by_id(
     if rgb_id in depth_id_map:
         return depth_path / depth_id_map[rgb_id]["path"]
     return None
+
+
+_CROP_THRESHOLD = 0.05
+
+
+def _validate_target_dim(dim: Optional[list[int]]) -> Optional[tuple[int, int]]:
+    if dim is None:
+        return None
+    if not isinstance(dim, (list, tuple)) or len(dim) != 2:
+        raise ValueError("rgb.datasets dim must be a list like [height, width]")
+    target_h, target_w = dim
+    try:
+        target_h = int(target_h)
+        target_w = int(target_w)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rgb.datasets dim entries must be integers") from exc
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError("rgb.datasets dim entries must be positive")
+    return target_h, target_w
+
+
+def _should_center_crop(
+    height: int,
+    width: int,
+    target_h: int,
+    target_w: int,
+    threshold: float = _CROP_THRESHOLD,
+) -> bool:
+    if target_h > height or target_w > width:
+        return False
+    if height == 0 or width == 0:
+        return False
+    diff_h = (height - target_h) / height
+    diff_w = (width - target_w) / width
+    return max(diff_h, diff_w) <= threshold
+
+
+def _center_crop(array: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    height, width = array.shape[:2]
+    top = (height - target_h) // 2
+    left = (width - target_w) // 2
+    return array[top : top + target_h, left : left + target_w]
+
+
+def _resize_rgb_image(
+    img: np.ndarray,
+    target_h: int,
+    target_w: int,
+    resample: int,
+) -> np.ndarray:
+    img_uint8 = np.clip(np.round(img * 255.0), 0, 255).astype(np.uint8)
+    resized = Image.fromarray(img_uint8, mode="RGB").resize(
+        (target_w, target_h), resample=resample
+    )
+    return np.asarray(resized).astype(np.float32) / 255.0
+
+
+def _resize_depth_map(
+    depth: np.ndarray,
+    target_h: int,
+    target_w: int,
+    resample: int,
+) -> np.ndarray:
+    depth_img = Image.fromarray(depth.astype(np.float32), mode="F")
+    resized = depth_img.resize((target_w, target_h), resample=resample)
+    return np.asarray(resized).astype(np.float32)
+
+
+def _adjust_rgb_gt_dimensions(
+    img_gt: np.ndarray, target_dim: tuple[int, int]
+) -> np.ndarray:
+    target_h, target_w = target_dim
+    height, width = img_gt.shape[:2]
+    if (height, width) == (target_h, target_w):
+        return img_gt
+    if _should_center_crop(height, width, target_h, target_w):
+        # Small reductions are cropped to avoid interpolation artifacts.
+        return _center_crop(img_gt, target_h, target_w)
+    resample = Image.LANCZOS if target_h < height or target_w < width else Image.BICUBIC
+    return _resize_rgb_image(img_gt, target_h, target_w, resample)
+
+
+def _adjust_depth_to_rgb_dimensions(
+    depth: np.ndarray, target_dim: tuple[int, int]
+) -> np.ndarray:
+    target_h, target_w = target_dim
+    height, width = depth.shape[:2]
+    if (height, width) == (target_h, target_w):
+        return depth
+    if _should_center_crop(height, width, target_h, target_w):
+        return _center_crop(depth, target_h, target_w)
+    return _resize_depth_map(depth, target_h, target_w, Image.BILINEAR)
 
 
 def evaluate_depth_datasets(
@@ -361,6 +454,10 @@ def evaluate_rgb_datasets(
     gt_path = Path(gt_config["path"])
     pred_path = Path(pred_config["path"])
 
+    target_dim = _validate_target_dim(pred_config.get("dim"))
+    if target_dim is not None:
+        print(f"Applying RGB GT preprocessing to target dim: {target_dim[0]}x{target_dim[1]}")
+
     depth_path = None
     depth_scale = 1.0
     depth_intrinsics = None
@@ -414,6 +511,17 @@ def evaluate_rgb_datasets(
                 print(f"Might be due to incomplete prediction dataset.")
             continue
 
+        if target_dim is not None:
+            img_gt = _adjust_rgb_gt_dimensions(img_gt, target_dim)
+
+        if img_gt.shape != img_pred.shape:
+            if verbose:
+                print(
+                    f"Warning: Size mismatch for {entry_id}: "
+                    f"gt {img_gt.shape} vs pred {img_pred.shape}. Skipping."
+                )
+            continue
+
         # Track successfully processed entry ID
         processed_entry_ids.append(entry_id)
 
@@ -439,6 +547,14 @@ def evaluate_rgb_datasets(
             if depth_file is not None:
                 try:
                     depth = load_depth_file(depth_file, depth_scale, depth_intrinsics)
+                    if target_dim is not None:
+                        depth = _adjust_depth_to_rgb_dimensions(depth, target_dim)
+                    elif depth.shape[:2] != img_gt.shape[:2]:
+                        depth = _adjust_depth_to_rgb_dimensions(depth, img_gt.shape[:2])
+                    if depth.shape[:2] != img_gt.shape[:2]:
+                        raise ValueError(
+                            f"Depth shape {depth.shape} does not match RGB shape {img_gt.shape}"
+                        )
                     depth_binned_entry = compute_depth_binned_photometric_error(img_pred, img_gt, depth)
                     depth_binned_results.append(depth_binned_entry)
                 except Exception as e:
