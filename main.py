@@ -49,6 +49,11 @@ def validate_dataset_config(dataset: dict, name: str, allow_output: bool = True)
                 f"{name} match_by_basename_suffix must be a positive integer"
             )
 
+    if "literal" in dataset:
+        literal = dataset["literal"]
+        if literal is not None and (not isinstance(literal, str) or not literal):
+            raise ValueError(f"{name} literal must be a non-empty string")
+
 
 def load_config(config_path: str) -> dict:
     """Load and validate configuration from JSON file.

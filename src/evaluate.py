@@ -43,39 +43,86 @@ from .metrics import (
 )
 
 
+class FileNamePreprocessor:
+    """Preprocess file stems before matching."""
+
+    def __init__(
+        self,
+        literal: Optional[str] = None,
+        remove_literals: bool = True,
+    ) -> None:
+        self.literal = literal
+        self.remove_literals = remove_literals
+
+    def process(self, stem: str) -> str:
+        if self.remove_literals and self.literal:
+            return stem.replace(self.literal, "")
+        return stem
+
+
+def _ensure_preprocessor(
+    preprocessor: Optional[FileNamePreprocessor],
+) -> FileNamePreprocessor:
+    if preprocessor is None:
+        return FileNamePreprocessor()
+    return preprocessor
+
+
 class FileMatcher:
     """Base class for file matching strategies."""
+
+    def key_for_path(
+        self,
+        file_path: Path,
+        root: Path,
+        preprocessor: FileNamePreprocessor,
+    ) -> tuple[Path, str]:
+        raise NotImplementedError
 
     def match(
         self,
         path1: Path,
         path2: Path,
         extensions: tuple[str, ...],
+        preprocessor1: FileNamePreprocessor,
+        preprocessor2: FileNamePreprocessor,
     ) -> list[tuple[Path, Path]]:
         raise NotImplementedError
 
 
 class MatchFilesByRelativePath(FileMatcher):
-    """Match files by exact relative path and extension."""
+    """Match files by relative path and extension."""
+
+    def key_for_path(
+        self,
+        file_path: Path,
+        root: Path,
+        preprocessor: FileNamePreprocessor,
+    ) -> tuple[Path, str]:
+        rel_path = file_path.relative_to(root)
+        rel_dir = rel_path.parent
+        stem = preprocessor.process(rel_path.stem)
+        return rel_dir, stem
 
     def match(
         self,
         path1: Path,
         path2: Path,
         extensions: tuple[str, ...],
+        preprocessor1: FileNamePreprocessor,
+        preprocessor2: FileNamePreprocessor,
     ) -> list[tuple[Path, Path]]:
         matches = []
+        extension_order = {ext: idx for idx, ext in enumerate(extensions)}
+        pred_index = _index_files(path2, extensions, self, preprocessor2)
 
         for ext in extensions:
             for file1 in path1.rglob(f"*{ext}"):
-                rel_path = file1.relative_to(path1)
-                stem = rel_path.with_suffix("")
-
-                for ext2 in extensions:
-                    file2 = path2 / stem.with_suffix(ext2)
-                    if file2.exists():
-                        matches.append((file1, file2))
-                        break
+                key = self.key_for_path(file1, path1, preprocessor1)
+                candidates = pred_index.get(key)
+                if not candidates:
+                    continue
+                matches.append((file1, _select_candidate(candidates, extension_order)))
 
         return matches
 
@@ -97,37 +144,48 @@ class MatchFilesByBaseNameSuffix(FileMatcher):
         path1: Path,
         path2: Path,
         extensions: tuple[str, ...],
+        preprocessor1: FileNamePreprocessor,
+        preprocessor2: FileNamePreprocessor,
     ) -> list[tuple[Path, Path]]:
         matches = []
         extension_order = {ext: idx for idx, ext in enumerate(extensions)}
-        pred_index = _index_files_by_suffix(path2, extensions, self.suffix_length)
+        pred_index = _index_files(path2, extensions, self, preprocessor2)
 
         for ext in extensions:
             for file1 in path1.rglob(f"*{ext}"):
-                rel_path = file1.relative_to(path1)
-                rel_dir = rel_path.parent
-                suffix = file1.stem[-self.suffix_length :]
-                candidates = pred_index.get((rel_dir, suffix))
+                key = self.key_for_path(file1, path1, preprocessor1)
+                candidates = pred_index.get(key)
                 if not candidates:
                     continue
                 matches.append((file1, _select_candidate(candidates, extension_order)))
 
         return matches
 
+    def key_for_path(
+        self,
+        file_path: Path,
+        root: Path,
+        preprocessor: FileNamePreprocessor,
+    ) -> tuple[Path, str]:
+        rel_path = file_path.relative_to(root)
+        rel_dir = rel_path.parent
+        stem = preprocessor.process(rel_path.stem)
+        suffix = stem[-self.suffix_length :]
+        return rel_dir, suffix
 
-def _index_files_by_suffix(
+
+def _index_files(
     root: Path,
     extensions: tuple[str, ...],
-    suffix_length: int,
+    matcher: FileMatcher,
+    preprocessor: FileNamePreprocessor,
 ) -> dict[tuple[Path, str], list[Path]]:
     index: dict[tuple[Path, str], list[Path]] = {}
 
     for ext in extensions:
         for file_path in root.rglob(f"*{ext}"):
-            rel_path = file_path.relative_to(root)
-            rel_dir = rel_path.parent
-            suffix = file_path.stem[-suffix_length:]
-            index.setdefault((rel_dir, suffix), []).append(file_path)
+            key = matcher.key_for_path(file_path, root, preprocessor)
+            index.setdefault(key, []).append(file_path)
 
     return index
 
@@ -171,11 +229,34 @@ def build_file_matcher(gt_config: dict, pred_config: dict) -> FileMatcher:
     return MatchFilesByBaseNameSuffix(suffix_length)
 
 
+def build_name_preprocessor(
+    dataset_config: dict,
+    remove_literals: bool = True,
+) -> FileNamePreprocessor:
+    return FileNamePreprocessor(
+        literal=dataset_config.get("literal"),
+        remove_literals=remove_literals,
+    )
+
+
+def build_match_context(
+    config1: dict,
+    config2: dict,
+    remove_literals: bool = True,
+) -> tuple[FileMatcher, FileNamePreprocessor, FileNamePreprocessor]:
+    matcher = build_file_matcher(config1, config2)
+    preprocessor1 = build_name_preprocessor(config1, remove_literals=remove_literals)
+    preprocessor2 = build_name_preprocessor(config2, remove_literals=remove_literals)
+    return matcher, preprocessor1, preprocessor2
+
+
 def find_matching_files(
     path1: Path,
     path2: Path,
     extensions: tuple[str, ...] = (".npy", ".png"),
     matcher: Optional[FileMatcher] = None,
+    preprocessor1: Optional[FileNamePreprocessor] = None,
+    preprocessor2: Optional[FileNamePreprocessor] = None,
 ) -> list[tuple[Path, Path]]:
     """Find matching files between two datasets.
 
@@ -184,19 +265,25 @@ def find_matching_files(
         path2: Root path of second dataset (predictions).
         extensions: Supported file extensions.
         matcher: Matching strategy (defaults to exact relative path).
+        preprocessor1: Preprocessor for dataset 1 filenames.
+        preprocessor2: Preprocessor for dataset 2 filenames.
 
     Returns:
         List of (gt_file, pred_file) path tuples with matching structure.
     """
     if matcher is None:
         matcher = MatchFilesByRelativePath()
-    return matcher.match(path1, path2, extensions)
+    preprocessor1 = _ensure_preprocessor(preprocessor1)
+    preprocessor2 = _ensure_preprocessor(preprocessor2)
+    return matcher.match(path1, path2, extensions, preprocessor1, preprocessor2)
 
 
 def find_matching_rgb_files(
     path1: Path,
     path2: Path,
     matcher: Optional[FileMatcher] = None,
+    preprocessor1: Optional[FileNamePreprocessor] = None,
+    preprocessor2: Optional[FileNamePreprocessor] = None,
 ) -> list[tuple[Path, Path]]:
     """Find matching RGB files between two datasets.
 
@@ -212,6 +299,8 @@ def find_matching_rgb_files(
         path2,
         extensions=(".png", ".jpg", ".jpeg"),
         matcher=matcher,
+        preprocessor1=preprocessor1,
+        preprocessor2=preprocessor2,
     )
 
 
@@ -220,6 +309,10 @@ def find_matching_depth_for_rgb(
     rgb_root: Path,
     depth_root: Path,
     depth_extensions: tuple[str, ...] = (".npy", ".png"),
+    matcher: Optional[FileMatcher] = None,
+    rgb_preprocessor: Optional[FileNamePreprocessor] = None,
+    depth_preprocessor: Optional[FileNamePreprocessor] = None,
+    depth_index: Optional[dict[tuple[Path, str], list[Path]]] = None,
 ) -> Optional[Path]:
     """Find matching depth file for an RGB file.
 
@@ -228,19 +321,29 @@ def find_matching_depth_for_rgb(
         rgb_root: Root of the RGB dataset.
         depth_root: Root of the depth dataset.
         depth_extensions: Supported depth file extensions.
+        matcher: Matching strategy (defaults to exact relative path).
+        rgb_preprocessor: Preprocessor for RGB filenames.
+        depth_preprocessor: Preprocessor for depth filenames.
+        depth_index: Optional prebuilt index for depth files.
 
     Returns:
         Path to matching depth file, or None if not found.
     """
-    rel_path = rgb_path.relative_to(rgb_root)
-    stem = rel_path.with_suffix("")
+    if matcher is None:
+        matcher = MatchFilesByRelativePath()
+    rgb_preprocessor = _ensure_preprocessor(rgb_preprocessor)
+    depth_preprocessor = _ensure_preprocessor(depth_preprocessor)
+    if depth_index is None:
+        depth_index = _index_files(
+            depth_root, depth_extensions, matcher, depth_preprocessor
+        )
 
-    for ext in depth_extensions:
-        depth_path = depth_root / stem.with_suffix(ext)
-        if depth_path.exists():
-            return depth_path
-
-    return None
+    key = matcher.key_for_path(rgb_path, rgb_root, rgb_preprocessor)
+    candidates = depth_index.get(key)
+    if not candidates:
+        return None
+    extension_order = {ext: idx for idx, ext in enumerate(depth_extensions)}
+    return _select_candidate(candidates, extension_order)
 
 
 def evaluate_depth_datasets(
@@ -275,12 +378,16 @@ def evaluate_depth_datasets(
 
     # Find matching files
     print("Finding matching depth files...")
-    matcher = build_file_matcher(gt_config, pred_config)
+    matcher, gt_preprocessor, pred_preprocessor = build_match_context(
+        gt_config, pred_config
+    )
     matches = find_matching_files(
         gt_path,
         pred_path,
         extensions=(".npy", ".png"),
         matcher=matcher,
+        preprocessor1=gt_preprocessor,
+        preprocessor2=pred_preprocessor,
     )
 
     if not matches:
@@ -442,10 +549,20 @@ def evaluate_rgb_datasets(
         depth_scale = depth_gt_config.get("depth_scale", 1.0)
         depth_intrinsics = depth_gt_config.get("intrinsics")
 
+    depth_extensions = (".npy", ".png")
+
     # Find matching RGB files
     print("Finding matching RGB files...")
-    matcher = build_file_matcher(gt_config, pred_config)
-    matches = find_matching_rgb_files(gt_path, pred_path, matcher=matcher)
+    matcher, gt_preprocessor, pred_preprocessor = build_match_context(
+        gt_config, pred_config
+    )
+    matches = find_matching_rgb_files(
+        gt_path,
+        pred_path,
+        matcher=matcher,
+        preprocessor1=gt_preprocessor,
+        preprocessor2=pred_preprocessor,
+    )
 
     if not matches:
         raise ValueError(f"No matching RGB files found between {gt_path} and {pred_path}")
@@ -466,6 +583,17 @@ def evaluate_rgb_datasets(
     depth_binned_results = []
 
     has_depth = depth_path is not None
+    depth_matcher = None
+    rgb_depth_preprocessor = None
+    depth_preprocessor = None
+    depth_index = None
+    if has_depth:
+        depth_matcher, rgb_depth_preprocessor, depth_preprocessor = build_match_context(
+            gt_config, depth_gt_config
+        )
+        depth_index = _index_files(
+            depth_path, depth_extensions, depth_matcher, depth_preprocessor
+        )
 
     # Process each pair
     print("Computing per-image RGB metrics...")
@@ -496,7 +624,16 @@ def evaluate_rgb_datasets(
 
         # Depth-binned photometric error (if depth available)
         if has_depth:
-            depth_file = find_matching_depth_for_rgb(gt_file, gt_path, depth_path)
+            depth_file = find_matching_depth_for_rgb(
+                gt_file,
+                gt_path,
+                depth_path,
+                depth_extensions=depth_extensions,
+                matcher=depth_matcher,
+                rgb_preprocessor=rgb_depth_preprocessor,
+                depth_preprocessor=depth_preprocessor,
+                depth_index=depth_index,
+            )
             if depth_file is not None:
                 try:
                     depth = load_depth_file(depth_file, depth_scale, depth_intrinsics)
