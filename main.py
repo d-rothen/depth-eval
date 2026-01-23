@@ -122,7 +122,7 @@ def save_results(results: dict, dataset_config: dict, default_path: Path) -> Pat
     """
     output_file = dataset_config.get("output_file")
     if output_file is None:
-        output_file = default_path / "metrics.json"
+        output_file = default_path / "eval.json"
     else:
         output_file = Path(output_file)
 
