@@ -3,6 +3,7 @@
 Runs all metrics over depth and RGB datasets with matching structure.
 """
 
+import json
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -42,79 +43,122 @@ from .metrics import (
 )
 
 
-def find_matching_files(
+def load_output_json(dataset_path: Path) -> dict:
+    """Load output.json from a dataset path.
+
+    Args:
+        dataset_path: Root path of the dataset.
+
+    Returns:
+        Parsed output.json contents.
+
+    Raises:
+        FileNotFoundError: If output.json doesn't exist.
+        json.JSONDecodeError: If output.json is invalid.
+    """
+    output_json_path = dataset_path / "output.json"
+    with open(output_json_path, "r") as f:
+        return json.load(f)
+
+
+def build_entry_lookup(output_json: dict, dataset_path: Path) -> dict[tuple[str, str], Path]:
+    """Build a lookup table from (parent_folder, id) to file path.
+
+    Args:
+        output_json: Parsed output.json contents.
+        dataset_path: Root path of the dataset.
+
+    Returns:
+        Dictionary mapping (parent_folder, id) tuples to absolute file paths.
+    """
+    lookup = {}
+    for entry in output_json.get("dataset", []):
+        entry_path = entry.get("path", "")
+        entry_id = entry.get("id", "")
+        if entry_path and entry_id:
+            # Get parent folder (directory containing the file)
+            parent_folder = str(Path(entry_path).parent)
+            full_path = dataset_path / entry_path
+            lookup[(parent_folder, entry_id)] = full_path
+    return lookup
+
+
+def find_matching_files_from_json(
     path1: Path,
     path2: Path,
-    extensions: tuple = (".npy", ".png"),
 ) -> list[tuple[Path, Path]]:
-    """Find matching files between two datasets.
+    """Find matching files between two datasets using output.json.
+
+    Matches entries by their parent folder path and id.
 
     Args:
         path1: Root path of first dataset (GT).
         path2: Root path of second dataset (predictions).
-        extensions: Supported file extensions.
 
     Returns:
-        List of (gt_file, pred_file) path tuples with matching structure.
+        List of (gt_file, pred_file) path tuples with matching entries.
     """
+    # Load output.json from both datasets
+    output1 = load_output_json(path1)
+    output2 = load_output_json(path2)
+
+    # Build lookup tables
+    lookup1 = build_entry_lookup(output1, path1)
+    lookup2 = build_entry_lookup(output2, path2)
+
+    # Find matches by (parent_folder, id)
     matches = []
-
-    # Find all files in GT dataset
-    for ext in extensions:
-        for file1 in path1.rglob(f"*{ext}"):
-            rel_path = file1.relative_to(path1)
-            stem = rel_path.with_suffix("")
-
-            # Look for matching file in predictions (with any supported extension)
-            for ext2 in extensions:
-                file2 = path2 / stem.with_suffix(ext2)
-                if file2.exists():
-                    matches.append((file1, file2))
-                    break
+    for key, file1 in lookup1.items():
+        if key in lookup2:
+            file2 = lookup2[key]
+            if file1.exists() and file2.exists():
+                matches.append((file1, file2))
 
     return matches
 
 
-def find_matching_rgb_files(
-    path1: Path,
-    path2: Path,
-) -> list[tuple[Path, Path]]:
-    """Find matching RGB files between two datasets.
-
-    Args:
-        path1: Root path of first dataset (GT).
-        path2: Root path of second dataset (predictions).
-
-    Returns:
-        List of (gt_file, pred_file) path tuples.
-    """
-    return find_matching_files(path1, path2, extensions=(".png", ".jpg", ".jpeg"))
-
-
-def find_matching_depth_for_rgb(
+def find_matching_depth_for_rgb_from_json(
     rgb_path: Path,
     rgb_root: Path,
+    rgb_output_json: dict,
     depth_root: Path,
-    depth_extensions: tuple = (".npy", ".png"),
+    depth_output_json: dict,
 ) -> Optional[Path]:
-    """Find matching depth file for an RGB file.
+    """Find matching depth file for an RGB file using output.json.
 
     Args:
         rgb_path: Path to the RGB file.
         rgb_root: Root of the RGB dataset.
+        rgb_output_json: Parsed output.json from RGB dataset.
         depth_root: Root of the depth dataset.
-        depth_extensions: Supported depth file extensions.
+        depth_output_json: Parsed output.json from depth dataset.
 
     Returns:
         Path to matching depth file, or None if not found.
     """
-    rel_path = rgb_path.relative_to(rgb_root)
-    stem = rel_path.with_suffix("")
+    # Find the entry in RGB output.json that matches rgb_path
+    rel_rgb_path = rgb_path.relative_to(rgb_root)
+    rgb_entry = None
+    for entry in rgb_output_json.get("dataset", []):
+        if Path(entry.get("path", "")) == rel_rgb_path:
+            rgb_entry = entry
+            break
 
-    for ext in depth_extensions:
-        depth_path = depth_root / stem.with_suffix(ext)
-        if depth_path.exists():
-            return depth_path
+    if rgb_entry is None:
+        return None
+
+    # Get parent folder and id for matching
+    parent_folder = str(Path(rgb_entry["path"]).parent)
+    entry_id = rgb_entry.get("id", "")
+
+    # Find matching depth entry
+    for entry in depth_output_json.get("dataset", []):
+        depth_parent = str(Path(entry.get("path", "")).parent)
+        depth_id = entry.get("id", "")
+        if depth_parent == parent_folder and depth_id == entry_id:
+            depth_path = depth_root / entry["path"]
+            if depth_path.exists():
+                return depth_path
 
     return None
 
@@ -149,9 +193,9 @@ def evaluate_depth_datasets(
     gt_intrinsics = gt_config.get("intrinsics")
     pred_intrinsics = pred_config.get("intrinsics")
 
-    # Find matching files
+    # Find matching files using output.json
     print("Finding matching depth files...")
-    matches = find_matching_files(gt_path, pred_path, extensions=(".npy", ".png"))
+    matches = find_matching_files_from_json(gt_path, pred_path)
 
     if not matches:
         raise ValueError(f"No matching depth files found between {gt_path} and {pred_path}")
@@ -307,14 +351,19 @@ def evaluate_rgb_datasets(
     depth_path = None
     depth_scale = 1.0
     depth_intrinsics = None
+    depth_output_json = None
     if depth_gt_config is not None:
         depth_path = Path(depth_gt_config["path"])
         depth_scale = depth_gt_config.get("depth_scale", 1.0)
         depth_intrinsics = depth_gt_config.get("intrinsics")
+        depth_output_json = load_output_json(depth_path)
 
-    # Find matching RGB files
+    # Find matching RGB files using output.json
     print("Finding matching RGB files...")
-    matches = find_matching_rgb_files(gt_path, pred_path)
+    matches = find_matching_files_from_json(gt_path, pred_path)
+
+    # Load GT output.json for depth matching
+    gt_output_json = load_output_json(gt_path)
 
     if not matches:
         raise ValueError(f"No matching RGB files found between {gt_path} and {pred_path}")
@@ -364,8 +413,10 @@ def evaluate_rgb_datasets(
         high_freq_results.append(compute_high_freq_energy_comparison(img_pred, img_gt))
 
         # Depth-binned photometric error (if depth available)
-        if has_depth:
-            depth_file = find_matching_depth_for_rgb(gt_file, gt_path, depth_path)
+        if has_depth and depth_output_json is not None:
+            depth_file = find_matching_depth_for_rgb_from_json(
+                gt_file, gt_path, gt_output_json, depth_path, depth_output_json
+            )
             if depth_file is not None:
                 try:
                     depth = load_depth_file(depth_file, depth_scale, depth_intrinsics)
