@@ -3,9 +3,10 @@
 Runs all metrics over depth and RGB datasets with matching structure.
 """
 
-import numpy as np
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 from tqdm import tqdm
 
 from .metrics import (
@@ -42,10 +43,139 @@ from .metrics import (
 )
 
 
+class FileMatcher:
+    """Base class for file matching strategies."""
+
+    def match(
+        self,
+        path1: Path,
+        path2: Path,
+        extensions: tuple[str, ...],
+    ) -> list[tuple[Path, Path]]:
+        raise NotImplementedError
+
+
+class MatchFilesByRelativePath(FileMatcher):
+    """Match files by exact relative path and extension."""
+
+    def match(
+        self,
+        path1: Path,
+        path2: Path,
+        extensions: tuple[str, ...],
+    ) -> list[tuple[Path, Path]]:
+        matches = []
+
+        for ext in extensions:
+            for file1 in path1.rglob(f"*{ext}"):
+                rel_path = file1.relative_to(path1)
+                stem = rel_path.with_suffix("")
+
+                for ext2 in extensions:
+                    file2 = path2 / stem.with_suffix(ext2)
+                    if file2.exists():
+                        matches.append((file1, file2))
+                        break
+
+        return matches
+
+
+class MatchFilesByBaseNameSuffix(FileMatcher):
+    """Match files by last N characters of the basename within the same folder."""
+
+    def __init__(self, suffix_length: int) -> None:
+        if (
+            isinstance(suffix_length, bool)
+            or not isinstance(suffix_length, int)
+            or suffix_length <= 0
+        ):
+            raise ValueError("match_by_basename_suffix must be a positive integer")
+        self.suffix_length = suffix_length
+
+    def match(
+        self,
+        path1: Path,
+        path2: Path,
+        extensions: tuple[str, ...],
+    ) -> list[tuple[Path, Path]]:
+        matches = []
+        extension_order = {ext: idx for idx, ext in enumerate(extensions)}
+        pred_index = _index_files_by_suffix(path2, extensions, self.suffix_length)
+
+        for ext in extensions:
+            for file1 in path1.rglob(f"*{ext}"):
+                rel_path = file1.relative_to(path1)
+                rel_dir = rel_path.parent
+                suffix = file1.stem[-self.suffix_length :]
+                candidates = pred_index.get((rel_dir, suffix))
+                if not candidates:
+                    continue
+                matches.append((file1, _select_candidate(candidates, extension_order)))
+
+        return matches
+
+
+def _index_files_by_suffix(
+    root: Path,
+    extensions: tuple[str, ...],
+    suffix_length: int,
+) -> dict[tuple[Path, str], list[Path]]:
+    index: dict[tuple[Path, str], list[Path]] = {}
+
+    for ext in extensions:
+        for file_path in root.rglob(f"*{ext}"):
+            rel_path = file_path.relative_to(root)
+            rel_dir = rel_path.parent
+            suffix = file_path.stem[-suffix_length:]
+            index.setdefault((rel_dir, suffix), []).append(file_path)
+
+    return index
+
+
+def _select_candidate(
+    candidates: list[Path],
+    extension_order: dict[str, int],
+) -> Path:
+    def sort_key(path: Path) -> tuple[int, str]:
+        return (extension_order.get(path.suffix, len(extension_order)), str(path))
+
+    return min(candidates, key=sort_key)
+
+
+def _resolve_match_by_basename_suffix(
+    gt_config: dict,
+    pred_config: dict,
+) -> Optional[int]:
+    gt_value = gt_config.get("match_by_basename_suffix")
+    pred_value = pred_config.get("match_by_basename_suffix")
+
+    if gt_value is not None and pred_value is not None and gt_value != pred_value:
+        raise ValueError(
+            "match_by_basename_suffix must match between GT and prediction configs"
+        )
+
+    value = pred_value if pred_value is not None else gt_value
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("match_by_basename_suffix must be a positive integer")
+
+    return value
+
+
+def build_file_matcher(gt_config: dict, pred_config: dict) -> FileMatcher:
+    """Build a matcher from dataset configs."""
+    suffix_length = _resolve_match_by_basename_suffix(gt_config, pred_config)
+    if suffix_length is None:
+        return MatchFilesByRelativePath()
+    return MatchFilesByBaseNameSuffix(suffix_length)
+
+
 def find_matching_files(
     path1: Path,
     path2: Path,
-    extensions: tuple = (".npy", ".png"),
+    extensions: tuple[str, ...] = (".npy", ".png"),
+    matcher: Optional[FileMatcher] = None,
 ) -> list[tuple[Path, Path]]:
     """Find matching files between two datasets.
 
@@ -53,31 +183,20 @@ def find_matching_files(
         path1: Root path of first dataset (GT).
         path2: Root path of second dataset (predictions).
         extensions: Supported file extensions.
+        matcher: Matching strategy (defaults to exact relative path).
 
     Returns:
         List of (gt_file, pred_file) path tuples with matching structure.
     """
-    matches = []
-
-    # Find all files in GT dataset
-    for ext in extensions:
-        for file1 in path1.rglob(f"*{ext}"):
-            rel_path = file1.relative_to(path1)
-            stem = rel_path.with_suffix("")
-
-            # Look for matching file in predictions (with any supported extension)
-            for ext2 in extensions:
-                file2 = path2 / stem.with_suffix(ext2)
-                if file2.exists():
-                    matches.append((file1, file2))
-                    break
-
-    return matches
+    if matcher is None:
+        matcher = MatchFilesByRelativePath()
+    return matcher.match(path1, path2, extensions)
 
 
 def find_matching_rgb_files(
     path1: Path,
     path2: Path,
+    matcher: Optional[FileMatcher] = None,
 ) -> list[tuple[Path, Path]]:
     """Find matching RGB files between two datasets.
 
@@ -88,14 +207,19 @@ def find_matching_rgb_files(
     Returns:
         List of (gt_file, pred_file) path tuples.
     """
-    return find_matching_files(path1, path2, extensions=(".png", ".jpg", ".jpeg"))
+    return find_matching_files(
+        path1,
+        path2,
+        extensions=(".png", ".jpg", ".jpeg"),
+        matcher=matcher,
+    )
 
 
 def find_matching_depth_for_rgb(
     rgb_path: Path,
     rgb_root: Path,
     depth_root: Path,
-    depth_extensions: tuple = (".npy", ".png"),
+    depth_extensions: tuple[str, ...] = (".npy", ".png"),
 ) -> Optional[Path]:
     """Find matching depth file for an RGB file.
 
@@ -151,7 +275,13 @@ def evaluate_depth_datasets(
 
     # Find matching files
     print("Finding matching depth files...")
-    matches = find_matching_files(gt_path, pred_path, extensions=(".npy", ".png"))
+    matcher = build_file_matcher(gt_config, pred_config)
+    matches = find_matching_files(
+        gt_path,
+        pred_path,
+        extensions=(".npy", ".png"),
+        matcher=matcher,
+    )
 
     if not matches:
         raise ValueError(f"No matching depth files found between {gt_path} and {pred_path}")
@@ -314,7 +444,8 @@ def evaluate_rgb_datasets(
 
     # Find matching RGB files
     print("Finding matching RGB files...")
-    matches = find_matching_rgb_files(gt_path, pred_path)
+    matcher = build_file_matcher(gt_config, pred_config)
+    matches = find_matching_rgb_files(gt_path, pred_path, matcher=matcher)
 
     if not matches:
         raise ValueError(f"No matching RGB files found between {gt_path} and {pred_path}")

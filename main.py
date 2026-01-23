@@ -42,6 +42,13 @@ def validate_dataset_config(dataset: dict, name: str, allow_output: bool = True)
             if key not in intrinsics:
                 raise ValueError(f"{name} intrinsics missing '{key}'")
 
+    if "match_by_basename_suffix" in dataset:
+        value = dataset["match_by_basename_suffix"]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"{name} match_by_basename_suffix must be a positive integer"
+            )
+
 
 def load_config(config_path: str) -> dict:
     """Load and validate configuration from JSON file.
