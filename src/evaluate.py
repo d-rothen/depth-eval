@@ -365,72 +365,76 @@ def evaluate_depth_datasets(
         edge_f1 = edge_f1_results[i]
 
         per_file_metrics[entry_id] = {
-            "image_quality": {
-                "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
-                "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
-                "lpips": float(lpips_values[i]),
-            },
-            "depth_metrics": {
-                "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
-                "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
-                "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
-            },
-            "geometric_metrics": {
-                "normal_consistency": {
-                    "mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
+            "depth": {
+                "image_quality": {
+                    "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
+                    "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
+                    "lpips": float(lpips_values[i]),
                 },
-                "depth_edge_f1": {
-                    "precision": float(edge_f1["precision"]),
-                    "recall": float(edge_f1["recall"]),
-                    "f1": float(edge_f1["f1"]),
+                "depth_metrics": {
+                    "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
+                    "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
+                    "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
+                },
+                "geometric_metrics": {
+                    "normal_consistency": {
+                        "mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
+                    },
+                    "depth_edge_f1": {
+                        "precision": float(edge_f1["precision"]),
+                        "recall": float(edge_f1["recall"]),
+                        "f1": float(edge_f1["f1"]),
+                    },
                 },
             },
         }
 
     results = {
-        "image_quality": {
-            "psnr": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
-            "ssim": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
-            "lpips": float(np.mean(lpips_values)),
-            "fid": fid_value,
-            "kid_mean": kid_mean,
-            "kid_std": kid_std,
-        },
-        "depth_metrics": {
-            "absrel": {
-                "median": absrel_agg["median"],
-                "p90": absrel_agg["p90"],
+        "depth": {
+            "image_quality": {
+                "psnr": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
+                "ssim": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
+                "lpips": float(np.mean(lpips_values)),
+                "fid": fid_value,
+                "kid_mean": kid_mean,
+                "kid_std": kid_std,
             },
-            "rmse": {
-                "median": rmse_agg["median"],
-                "p90": rmse_agg["p90"],
+            "depth_metrics": {
+                "absrel": {
+                    "median": absrel_agg["median"],
+                    "p90": absrel_agg["p90"],
+                },
+                "rmse": {
+                    "median": rmse_agg["median"],
+                    "p90": rmse_agg["p90"],
+                },
+                "silog": {
+                    "mean": float(np.mean([v for v in silog_full_values if np.isfinite(v)])),
+                    "median": silog_agg["median"],
+                    "p90": silog_agg["p90"],
+                },
             },
-            "silog": {
-                "mean": float(np.mean([v for v in silog_full_values if np.isfinite(v)])),
-                "median": silog_agg["median"],
-                "p90": silog_agg["p90"],
+            "geometric_metrics": {
+                "normal_consistency": {
+                    "mean_angle": normal_agg["mean_angle"],
+                    "median_angle": normal_agg["median_angle"],
+                    "percent_below_11_25": normal_agg["percent_below_11_25"],
+                    "percent_below_22_5": normal_agg["percent_below_22_5"],
+                    "percent_below_30": normal_agg["percent_below_30"],
+                },
+                "depth_edge_f1": {
+                    "precision": edge_f1_agg["precision"],
+                    "recall": edge_f1_agg["recall"],
+                    "f1": edge_f1_agg["f1"],
+                },
             },
-        },
-        "geometric_metrics": {
-            "normal_consistency": {
-                "mean_angle": normal_agg["mean_angle"],
-                "median_angle": normal_agg["median_angle"],
-                "percent_below_11_25": normal_agg["percent_below_11_25"],
-                "percent_below_22_5": normal_agg["percent_below_22_5"],
-                "percent_below_30": normal_agg["percent_below_30"],
+            "dataset_info": {
+                "num_pairs": len(matches),
+                "gt_name": gt_config["name"],
+                "pred_name": pred_config["name"],
+                "gt_path": str(gt_path),
+                "pred_path": str(pred_path),
             },
-            "depth_edge_f1": {
-                "precision": edge_f1_agg["precision"],
-                "recall": edge_f1_agg["recall"],
-                "f1": edge_f1_agg["f1"],
-            },
-        },
-        "dataset_info": {
-            "num_pairs": len(matches),
-            "gt_name": gt_config["name"],
-            "pred_name": pred_config["name"],
-            "gt_path": str(gt_path),
-            "pred_path": str(pred_path),
         },
         "per_file_metrics": per_file_metrics,
     }
@@ -662,7 +666,7 @@ def evaluate_rgb_datasets(
         tail_error_arr = tail_error_arrays[i]
         high_freq = high_freq_results[i]
 
-        entry_metrics = {
+        rgb_metrics = {
             "image_quality": {
                 "psnr": _none_if_nan(psnr_values[i]),
                 "ssim": _none_if_nan(ssim_values[i]),
@@ -691,11 +695,11 @@ def evaluate_rgb_datasets(
         # Add depth-binned metrics if available for this entry
         depth_binned = depth_binned_per_entry[i]
         if depth_binned is not None or depth_binned_attempted[i]:
-            entry_metrics["depth_binned_photometric"] = depth_binned
+            rgb_metrics["depth_binned_photometric"] = depth_binned
 
-        per_file_metrics[entry_id] = entry_metrics
+        per_file_metrics[entry_id] = {"rgb": rgb_metrics}
 
-    results = {
+    rgb_results = {
         "image_quality": {
             "psnr": _safe_mean(psnr_values, "psnr"),
             "ssim": _safe_mean(ssim_values, "ssim"),
@@ -722,16 +726,20 @@ def evaluate_rgb_datasets(
             "gt_path": str(gt_path),
             "pred_path": str(pred_path),
         },
-        "per_file_metrics": per_file_metrics,
     }
 
     # Add depth-binned metrics if available
     if depth_binned_results:
         depth_binned_agg = aggregate_depth_binned_errors(depth_binned_results)
-        results["depth_binned_photometric"] = depth_binned_agg
+        rgb_results["depth_binned_photometric"] = depth_binned_agg
     elif has_depth:
         print("Warning: No valid depth_binned_photometric results; setting aggregate to None.")
-        results["depth_binned_photometric"] = None
+        rgb_results["depth_binned_photometric"] = None
+
+    results = {
+        "rgb": rgb_results,
+        "per_file_metrics": per_file_metrics,
+    }
 
     return results
 
