@@ -365,23 +365,33 @@ def evaluate_depth_datasets(
         edge_f1 = edge_f1_results[i]
 
         per_file_metrics[entry_id] = {
-            "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
-            "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
-            "lpips": float(lpips_values[i]),
-            "absrel_mean": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
-            "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
-            "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
-            "normal_mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
-            "edge_f1_precision": float(edge_f1["precision"]),
-            "edge_f1_recall": float(edge_f1["recall"]),
-            "edge_f1_f1": float(edge_f1["f1"]),
+            "image_quality": {
+                "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
+                "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
+                "lpips": float(lpips_values[i]),
+            },
+            "depth_metrics": {
+                "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
+                "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
+                "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
+            },
+            "geometric_metrics": {
+                "normal_consistency": {
+                    "mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
+                },
+                "depth_edge_f1": {
+                    "precision": float(edge_f1["precision"]),
+                    "recall": float(edge_f1["recall"]),
+                    "f1": float(edge_f1["f1"]),
+                },
+            },
         }
 
     results = {
         "image_quality": {
-            "psnr_mean": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
-            "ssim_mean": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
-            "lpips_mean": float(np.mean(lpips_values)),
+            "psnr": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
+            "ssim": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
+            "lpips": float(np.mean(lpips_values)),
             "fid": fid_value,
             "kid_mean": kid_mean,
             "kid_std": kid_std,
@@ -653,35 +663,43 @@ def evaluate_rgb_datasets(
         high_freq = high_freq_results[i]
 
         entry_metrics = {
-            "psnr": _none_if_nan(psnr_values[i]),
-            "ssim": _none_if_nan(ssim_values[i]),
-            "lpips": _none_if_nan(lpips_values[i]),
-            "edge_f1_precision": _none_if_nan(edge_f1["precision"]) if edge_f1 else None,
-            "edge_f1_recall": _none_if_nan(edge_f1["recall"]) if edge_f1 else None,
-            "edge_f1_f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
-            "tail_error_p95": float(np.percentile(tail_error_arr, 95))
-            if tail_error_arr is not None and len(tail_error_arr) > 0
-            else None,
-            "tail_error_p99": float(np.percentile(tail_error_arr, 99))
-            if tail_error_arr is not None and len(tail_error_arr) > 0
-            else None,
-            "high_freq_pred_ratio": _none_if_nan(high_freq["pred_hf_ratio"]) if high_freq else None,
-            "high_freq_gt_ratio": _none_if_nan(high_freq["gt_hf_ratio"]) if high_freq else None,
-            "high_freq_relative_diff": _none_if_nan(high_freq["relative_diff"]) if high_freq else None,
+            "image_quality": {
+                "psnr": _none_if_nan(psnr_values[i]),
+                "ssim": _none_if_nan(ssim_values[i]),
+                "lpips": _none_if_nan(lpips_values[i]),
+            },
+            "edge_f1": {
+                "precision": _none_if_nan(edge_f1["precision"]) if edge_f1 else None,
+                "recall": _none_if_nan(edge_f1["recall"]) if edge_f1 else None,
+                "f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
+            },
+            "tail_errors": {
+                "p95": float(np.percentile(tail_error_arr, 95))
+                if tail_error_arr is not None and len(tail_error_arr) > 0
+                else None,
+                "p99": float(np.percentile(tail_error_arr, 99))
+                if tail_error_arr is not None and len(tail_error_arr) > 0
+                else None,
+            },
+            "high_frequency": {
+                "pred_hf_ratio": _none_if_nan(high_freq["pred_hf_ratio"]) if high_freq else None,
+                "gt_hf_ratio": _none_if_nan(high_freq["gt_hf_ratio"]) if high_freq else None,
+                "relative_diff": _none_if_nan(high_freq["relative_diff"]) if high_freq else None,
+            },
         }
 
         # Add depth-binned metrics if available for this entry
         depth_binned = depth_binned_per_entry[i]
         if depth_binned is not None or depth_binned_attempted[i]:
-            entry_metrics["depth_binned_error"] = depth_binned
+            entry_metrics["depth_binned_photometric"] = depth_binned
 
         per_file_metrics[entry_id] = entry_metrics
 
     results = {
         "image_quality": {
-            "psnr_mean": _safe_mean(psnr_values, "psnr_mean"),
-            "ssim_mean": _safe_mean(ssim_values, "ssim_mean"),
-            "lpips_mean": _safe_mean(lpips_values, "lpips_mean"),
+            "psnr": _safe_mean(psnr_values, "psnr"),
+            "ssim": _safe_mean(ssim_values, "ssim"),
+            "lpips": _safe_mean(lpips_values, "lpips"),
         },
         "edge_f1": {
             "precision": _none_if_nan(edge_f1_agg["precision"]),
@@ -693,9 +711,9 @@ def evaluate_rgb_datasets(
             "p99": _none_if_nan(tail_agg["p99"]),
         },
         "high_frequency": {
-            "pred_hf_ratio_mean": _none_if_nan(high_freq_agg["pred_hf_ratio_mean"]),
-            "gt_hf_ratio_mean": _none_if_nan(high_freq_agg["gt_hf_ratio_mean"]),
-            "relative_diff_mean": _none_if_nan(high_freq_agg["relative_diff_mean"]),
+            "pred_hf_ratio": _none_if_nan(high_freq_agg["pred_hf_ratio_mean"]),
+            "gt_hf_ratio": _none_if_nan(high_freq_agg["gt_hf_ratio_mean"]),
+            "relative_diff": _none_if_nan(high_freq_agg["relative_diff_mean"]),
         },
         "dataset_info": {
             "num_pairs": len(matches),
