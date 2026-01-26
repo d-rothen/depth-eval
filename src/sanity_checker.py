@@ -104,6 +104,12 @@ class SanityChecker:
         self.depth_results = SanityCheckResult()
         self.rgb_results = SanityCheckResult()
 
+        # Track how many warnings have been reported in intermediate reports
+        self._last_reported_depth_warnings = 0
+        self._last_reported_rgb_warnings = 0
+        self._last_reported_depth_samples = 0
+        self._last_reported_rgb_samples = 0
+
     def _load_config(self) -> dict:
         """Load the metrics configuration file."""
         if not self.config_path.exists():
@@ -140,6 +146,10 @@ class SanityChecker:
         """Reset all collected results."""
         self.depth_results = SanityCheckResult()
         self.rgb_results = SanityCheckResult()
+        self._last_reported_depth_warnings = 0
+        self._last_reported_rgb_warnings = 0
+        self._last_reported_depth_samples = 0
+        self._last_reported_rgb_samples = 0
 
     # =========================================================================
     # Depth Metric Validation
@@ -706,6 +716,83 @@ class SanityChecker:
             "warnings_by_type": summary,
             "has_issues": self.rgb_results.has_warnings(),
         }
+
+    def print_pair_report(self, pair_name: str, is_depth: bool = True) -> None:
+        """Print a sanity check report for just the current dataset pair.
+
+        This prints only the warnings accumulated since the last call to
+        print_pair_report, allowing intermediate reports after each evaluation.
+
+        Args:
+            pair_name: Name of the dataset pair being evaluated.
+            is_depth: True for depth evaluation, False for RGB evaluation.
+        """
+        if is_depth:
+            results = self.depth_results
+            last_warnings = self._last_reported_depth_warnings
+            last_samples = self._last_reported_depth_samples
+            metric_type = "DEPTH"
+        else:
+            results = self.rgb_results
+            last_warnings = self._last_reported_rgb_warnings
+            last_samples = self._last_reported_rgb_samples
+            metric_type = "RGB"
+
+        # Get warnings added since last report
+        new_warnings = results.warnings[last_warnings:]
+        new_samples = results.total_samples - last_samples
+
+        if not new_warnings:
+            print(f"\n[{metric_type} SANITY CHECK] {pair_name}: All metrics passed (0 warnings)")
+            # Update tracking
+            if is_depth:
+                self._last_reported_depth_warnings = len(results.warnings)
+                self._last_reported_depth_samples = results.total_samples
+            else:
+                self._last_reported_rgb_warnings = len(results.warnings)
+                self._last_reported_rgb_samples = results.total_samples
+            return
+
+        # Build summary for just the new warnings
+        summary = {}
+        for warning in new_warnings:
+            key = f"{warning.metric_name}:{warning.warning_type}"
+            if key not in summary:
+                summary[key] = {
+                    "metric": warning.metric_name,
+                    "type": warning.warning_type,
+                    "message": warning.message,
+                    "count": 0,
+                    "sample_values": [],
+                }
+            summary[key]["count"] += 1
+            if warning.observed_value is not None and len(summary[key]["sample_values"]) < 3:
+                summary[key]["sample_values"].append(warning.observed_value)
+
+        # Print the intermediate report
+        print(f"\n{'─' * 70}")
+        print(f"  [{metric_type} SANITY CHECK] {pair_name}")
+        print(f"  {len(new_warnings)} warnings across {new_samples} samples")
+        print("─" * 70)
+
+        for key, info in summary.items():
+            ratio = info["count"] / new_samples if new_samples > 0 else 0
+            print(f"\n  {info['metric']} - {info['type']}:")
+            print(f"    Occurrences: {info['count']}/{new_samples} ({ratio*100:.1f}%)")
+            print(f"    {info['message']}")
+            if info["sample_values"]:
+                vals_str = ", ".join(f"{v:.4f}" for v in info["sample_values"])
+                print(f"    Sample values: {vals_str}")
+
+        print("─" * 70)
+
+        # Update tracking
+        if is_depth:
+            self._last_reported_depth_warnings = len(results.warnings)
+            self._last_reported_depth_samples = results.total_samples
+        else:
+            self._last_reported_rgb_warnings = len(results.warnings)
+            self._last_reported_rgb_samples = results.total_samples
 
     def print_report(self, title: str = "SANITY CHECK REPORT") -> None:
         """Print a formatted sanity check report to console.

@@ -264,6 +264,10 @@ def main():
                 sanity_checker=sanity_checker,
             )
 
+            # Print intermediate sanity check report for this dataset pair
+            if sanity_checker is not None:
+                sanity_checker.print_pair_report(dataset_config["name"], is_depth=True)
+
             output_path = save_results(
                 results, dataset_config, Path(dataset_config["path"])
             )
@@ -291,6 +295,10 @@ def main():
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
             )
+
+            # Print intermediate sanity check report for this dataset pair
+            if sanity_checker is not None:
+                sanity_checker.print_pair_report(dataset_config["name"], is_depth=False)
 
             output_path = save_results(
                 results, dataset_config, Path(dataset_config["path"])
