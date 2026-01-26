@@ -10,6 +10,8 @@ from typing import Optional
 from tqdm import tqdm
 from PIL import Image
 
+from .utils.hierarchy_parser import get_matches, set_value
+
 from .metrics import (
     # Depth utilities and metrics
     load_depth_file,
@@ -76,38 +78,22 @@ def load_dataset_manifest(dataset_path: Path) -> dict:
     return manifest
 
 
-def build_id_to_entry_map(manifest: dict) -> dict[str, dict]:
-    """Build a mapping from entry ID to entry data.
-
-    Args:
-        manifest: Parsed output.json manifest.
-
-    Returns:
-        Dictionary mapping ID strings to entry dictionaries.
-    """
-    id_map = {}
-    for entry in manifest["dataset"]:
-        entry_id = entry.get("id")
-        if entry_id is None:
-            raise ValueError(f"Entry missing 'id' field: {entry}")
-        if entry_id in id_map:
-            raise ValueError(f"Duplicate entry ID found: {entry_id}")
-        id_map[entry_id] = entry
-    return id_map
-
-
 def find_matching_files_by_id(
     path1: Path,
     path2: Path,
-) -> list[tuple[Path, Path, str]]:
-    """Find matching files between two datasets using output.json ID matching.
+) -> list[dict]:
+    """Find matching files between two datasets using hierarchical output.json matching.
 
     Args:
         path1: Root path of first dataset (GT).
         path2: Root path of second dataset (predictions).
 
     Returns:
-        List of (gt_file, pred_file, id) tuples for entries with matching IDs.
+        List of match dicts containing:
+        - hierarchy: List of keys forming the path to this entry
+        - id: The matched file id
+        - gt_file: Path to ground truth file
+        - pred_file: Path to prediction file
 
     Raises:
         FileNotFoundError: If output.json is missing from either dataset.
@@ -115,38 +101,63 @@ def find_matching_files_by_id(
     manifest1 = load_dataset_manifest(path1)
     manifest2 = load_dataset_manifest(path2)
 
-    id_map1 = build_id_to_entry_map(manifest1)
-    id_map2 = build_id_to_entry_map(manifest2)
+    # Use get_matches with the hierarchical dataset properties
+    raw_matches = get_matches([manifest1["dataset"], manifest2["dataset"]])
 
     matches = []
-    for entry_id, entry1 in id_map1.items():
-        if entry_id in id_map2:
-            entry2 = id_map2[entry_id]
-            file1 = path1 / entry1["path"]
-            file2 = path2 / entry2["path"]
-            matches.append((file1, file2, entry_id))
+    for match in raw_matches:
+        # Only include matches where both paths are present
+        if match["paths"][0] is not None and match["paths"][1] is not None:
+            matches.append({
+                "hierarchy": match["hierarchy"],
+                "id": match["id"],
+                "gt_file": path1 / match["paths"][0],
+                "pred_file": path2 / match["paths"][1],
+            })
 
     return matches
 
 
-def find_matching_depth_for_rgb_by_id(
-    rgb_id: str,
+def find_matching_depth_for_rgb(
+    hierarchy: list[str],
+    file_id: str,
     depth_path: Path,
-    depth_id_map: dict[str, dict],
+    depth_map: dict[tuple[tuple[str, ...], str], str],
 ) -> Optional[Path]:
-    """Find matching depth file for an RGB entry by ID.
+    """Find matching depth file for an RGB entry by hierarchy and ID.
 
     Args:
-        rgb_id: ID of the RGB entry.
+        hierarchy: List of keys forming the path to this entry.
+        file_id: ID of the file entry.
         depth_path: Root path of the depth dataset.
-        depth_id_map: Pre-built ID to entry map for depth dataset.
+        depth_map: Pre-built (hierarchy, id) -> path map for depth dataset.
 
     Returns:
         Path to matching depth file, or None if not found.
     """
-    if rgb_id in depth_id_map:
-        return depth_path / depth_id_map[rgb_id]["path"]
+    key = (tuple(hierarchy), file_id)
+    if key in depth_map:
+        return depth_path / depth_map[key]
     return None
+
+
+def build_depth_hierarchy_map(manifest: dict) -> dict[tuple[tuple[str, ...], str], str]:
+    """Build a mapping from (hierarchy, id) to path for depth dataset.
+
+    Args:
+        manifest: Parsed output.json manifest with hierarchical dataset.
+
+    Returns:
+        Dictionary mapping (hierarchy_tuple, id) to file path.
+    """
+    # Use get_matches with single dataset to extract all entries
+    matches = get_matches([manifest["dataset"]])
+    depth_map = {}
+    for match in matches:
+        if match["paths"][0] is not None:
+            key = (tuple(match["hierarchy"]), match["id"])
+            depth_map[key] = match["paths"][0]
+    return depth_map
 
 
 _CROP_THRESHOLD = 0.05
@@ -298,8 +309,8 @@ def evaluate_depth_datasets(
     normal_angle_values = []
     edge_f1_results = []
 
-    # Track entry IDs for per-file metrics
-    processed_entry_ids = []
+    # Track entries (hierarchy + id) for per-file metrics
+    processed_entries = []
 
     # Load all depth maps for FID/KID
     all_depths_gt = []
@@ -307,7 +318,12 @@ def evaluate_depth_datasets(
 
     # Process each pair
     print("Computing per-image depth metrics...")
-    for gt_file, pred_file, entry_id in tqdm(matches, desc="Processing depth pairs"):
+    for match in tqdm(matches, desc="Processing depth pairs"):
+        gt_file = match["gt_file"]
+        pred_file = match["pred_file"]
+        hierarchy = match["hierarchy"]
+        entry_id = match["id"]
+
         try:
             depth_gt = load_depth_file(gt_file, gt_depth_scale, gt_intrinsics)
             depth_pred = load_depth_file(pred_file, pred_depth_scale, pred_intrinsics)
@@ -320,8 +336,8 @@ def evaluate_depth_datasets(
         all_depths_gt.append(depth_gt)
         all_depths_pred.append(depth_pred)
 
-        # Track successfully processed entry ID
-        processed_entry_ids.append(entry_id)
+        # Track successfully processed entry (hierarchy + id)
+        processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
 
         # Image quality metrics
         psnr_values.append(compute_psnr(depth_pred, depth_gt))
@@ -358,13 +374,15 @@ def evaluate_depth_datasets(
 
     # Build per-file metrics (excluding FID/KID which are distribution metrics)
     per_file_metrics = {}
-    for i, entry_id in enumerate(processed_entry_ids):
+    for i, entry in enumerate(processed_entries):
+        hierarchy = entry["hierarchy"]
+        entry_id = entry["id"]
         absrel_arr = absrel_values[i]
         rmse_arr = rmse_values[i]
         normal_angles = normal_angle_values[i]
         edge_f1 = edge_f1_results[i]
 
-        per_file_metrics[entry_id] = {
+        depth_metrics_value = {
             "depth": {
                 "image_quality": {
                     "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
@@ -388,6 +406,9 @@ def evaluate_depth_datasets(
                 },
             },
         }
+
+        # Use set_value to place metrics in hierarchical structure
+        set_value(per_file_metrics, hierarchy, entry_id, {"id": entry_id, "metrics": depth_metrics_value})
 
     results = {
         "depth": {
@@ -497,14 +518,14 @@ def evaluate_rgb_datasets(
     depth_path = None
     depth_scale = 1.0
     depth_intrinsics = None
-    depth_id_map = None
+    depth_hierarchy_map = None
     if depth_gt_config is not None:
         depth_path = Path(depth_gt_config["path"])
         depth_scale = depth_gt_config.get("depth_scale", 1.0)
         depth_intrinsics = depth_gt_config.get("intrinsics")
-        # Load depth manifest for ID-based matching
+        # Load depth manifest for hierarchy-based matching
         depth_manifest = load_dataset_manifest(depth_path)
-        depth_id_map = build_id_to_entry_map(depth_manifest)
+        depth_hierarchy_map = build_depth_hierarchy_map(depth_manifest)
 
     # Find matching RGB files by ID from output.json manifests
     print("Finding matching RGB files...")
@@ -532,8 +553,8 @@ def evaluate_rgb_datasets(
     high_freq_results = []
     depth_binned_results = []
 
-    # Track entry IDs for per-file metrics
-    processed_entry_ids = []
+    # Track entries (hierarchy + id) for per-file metrics
+    processed_entries = []
     # Track depth-binned results per entry (None if not available)
     depth_binned_per_entry = []
     depth_binned_attempted = []
@@ -542,7 +563,12 @@ def evaluate_rgb_datasets(
 
     # Process each pair
     print("Computing per-image RGB metrics...")
-    for gt_file, pred_file, entry_id in tqdm(matches, desc="Processing RGB pairs"):
+    for match in tqdm(matches, desc="Processing RGB pairs"):
+        gt_file = match["gt_file"]
+        pred_file = match["pred_file"]
+        hierarchy = match["hierarchy"]
+        entry_id = match["id"]
+
         try:
             img_gt = load_rgb_file(gt_file)
             img_pred = load_rgb_file(pred_file)
@@ -563,8 +589,8 @@ def evaluate_rgb_datasets(
                 )
             continue
 
-        # Track successfully processed entry ID
-        processed_entry_ids.append(entry_id)
+        # Track successfully processed entry (hierarchy + id)
+        processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
 
         # Basic image quality metrics
         psnr_values.append(
@@ -610,8 +636,8 @@ def evaluate_rgb_datasets(
         # Depth-binned photometric error (if depth available)
         depth_binned_entry = None
         depth_binned_attempt = False
-        if has_depth and depth_id_map is not None:
-            depth_file = find_matching_depth_for_rgb_by_id(entry_id, depth_path, depth_id_map)
+        if has_depth and depth_hierarchy_map is not None:
+            depth_file = find_matching_depth_for_rgb(hierarchy, entry_id, depth_path, depth_hierarchy_map)
             if depth_file is not None:
                 depth_binned_attempt = True
                 try:
@@ -661,7 +687,9 @@ def evaluate_rgb_datasets(
 
     # Build per-file metrics
     per_file_metrics = {}
-    for i, entry_id in enumerate(processed_entry_ids):
+    for i, entry in enumerate(processed_entries):
+        hierarchy = entry["hierarchy"]
+        entry_id = entry["id"]
         edge_f1 = edge_f1_results[i]
         tail_error_arr = tail_error_arrays[i]
         high_freq = high_freq_results[i]
@@ -697,7 +725,10 @@ def evaluate_rgb_datasets(
         if depth_binned is not None or depth_binned_attempted[i]:
             rgb_metrics["depth_binned_photometric"] = depth_binned
 
-        per_file_metrics[entry_id] = {"rgb": rgb_metrics}
+        rgb_metrics_value = {"rgb": rgb_metrics}
+
+        # Use set_value to place metrics in hierarchical structure
+        set_value(per_file_metrics, hierarchy, entry_id, {"id": entry_id, "metrics": rgb_metrics_value})
 
     rgb_results = {
         "image_quality": {
