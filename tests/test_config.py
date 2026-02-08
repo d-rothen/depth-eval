@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from main import load_config, validate_dataset_entry, validate_gt_config
+from euler_eval.__main__ import load_config, validate_dataset_entry, validate_gt_config
 
 
 # ---------------------------------------------------------------------------

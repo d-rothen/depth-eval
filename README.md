@@ -17,6 +17,7 @@ Requires Python 3.10+.
 
 ```bash
 pip install -e .
+uv pip install git+https://github.com/d-rothen/euler-eval.git
 ```
 
 Or install dependencies directly:

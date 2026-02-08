@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "depth-eval"
-version = "0.2.0"
+name = "euler-eval"
+version = "0.3.0"
 description = "Depth map evaluation toolkit with comprehensive metrics"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,11 +44,11 @@ dev = [
 ]
 
 [project.scripts]
-depth-eval = "main:main"
+euler-eval = "euler_eval.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["euler_eval*"]
 
 [tool.black]
 line-length = 88

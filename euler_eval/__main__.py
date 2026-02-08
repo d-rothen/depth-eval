@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from src.data import (
+from .data import (
     DEFAULT_LOADER,
     build_depth_eval_dataset,
     build_rgb_eval_dataset,
@@ -17,8 +17,8 @@ from src.data import (
     get_rgb_metadata,
     load_loader_module,
 )
-from src.evaluate import evaluate_depth_samples, evaluate_rgb_samples
-from src.sanity_checker import SanityChecker
+from .evaluate import evaluate_depth_samples, evaluate_rgb_samples
+from .sanity_checker import SanityChecker
 
 
 def validate_gt_config(gt: dict) -> None:

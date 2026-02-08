@@ -2,7 +2,7 @@
 
 The system Python may lack optional/heavy packages (lpips, torchvision,
 euler_loading.DenseDepthLoader). This conftest stubs them so the test
-suite can import src.* modules without error.
+suite can import euler_eval.* modules without error.
 """
 
 import builtins
